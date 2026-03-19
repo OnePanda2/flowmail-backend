@@ -8,7 +8,13 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: [
+    "https://flowmail-frontend.vercel.app",
+    /chrome-extension:\/\/.*/
+  ],
+  methods: ["GET", "POST"],
+}));
 app.use(bodyParser.json());
 
 const supabase = createClient(
@@ -27,15 +33,18 @@ const razorpay = new Razorpay({
 
 
 
-// CREATE USER
+// CREATE USER (upsert — safe to call multiple times with the same email)
 app.post("/create-user", async (req, res) => {
   const { email } = req.body;
 
+  if (!email) return res.json({ error: "email required" });
+
   const { data, error } = await supabase
     .from("users")
-    .insert([{ email, isPaid: false }]);
+    .upsert([{ email, isPaid: false }], { onConflict: "email", ignoreDuplicates: true });
 
   if (error) {
+    console.error("create-user error:", error);
     return res.json({ error });
   }
 
