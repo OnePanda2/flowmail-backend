@@ -9,10 +9,14 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 
 app.use(cors({
-  origin: [
-    "https://flowmail-frontend.vercel.app",
-    /chrome-extension:\/\/.*/
-  ],
+  origin: function(origin, callback) {
+    // Allow requests from the Vercel frontend, all Chrome extensions, and direct calls (no origin)
+    if (!origin || origin === 'https://flowmail-frontend.vercel.app' || origin.startsWith('chrome-extension://')) {
+      callback(null, true);
+    } else {
+      callback(null, true); // allow all for now; tighten later in production
+    }
+  },
   methods: ["GET", "POST"],
 }));
 app.use(bodyParser.json());
@@ -33,42 +37,75 @@ const razorpay = new Razorpay({
 
 
 
-// CREATE USER (upsert — safe to call multiple times with the same email)
+// CREATE USER — check-then-insert (works even without a unique constraint on email)
 app.post("/create-user", async (req, res) => {
   const { email } = req.body;
 
   if (!email) return res.json({ error: "email required" });
 
-  const { data, error } = await supabase
-    .from("users")
-    .upsert([{ email, isPaid: false }], { onConflict: "email", ignoreDuplicates: true });
+  try {
+    // 1. Check if user already exists
+    const { data: existing } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", email)
+      .maybeSingle();
 
-  if (error) {
-    console.error("create-user error:", error);
-    return res.json({ error });
+    if (existing) {
+      // Already in DB — nothing to do
+      return res.json({ success: true, existed: true });
+    }
+
+    // 2. Insert new user
+    const { error: insertError } = await supabase
+      .from("users")
+      .insert([{ email, isPaid: false }]);
+
+    if (insertError) {
+      console.error("create-user insert error:", insertError);
+      return res.json({ error: insertError });
+    }
+
+    console.log("New user created:", email);
+    res.json({ success: true, existed: false });
+  } catch (err) {
+    console.error("create-user exception:", err);
+    res.json({ error: err.message });
   }
-
-  res.json({ success: true });
 });
 
 
 
-// VERIFY PAYMENT
+// VERIFY PAYMENT — creates user if not exists, then marks as paid
 app.post("/verify-payment", async (req, res) => {
-  const { email, payment_id, plan } = req.body
+  const { email, payment_id, plan } = req.body;
 
-  const { error } = await supabase
-    .from("users")
-    .update({
-      isPaid: true,
-      payment_id,
-      plan,
-    })
-    .eq("email", email)
+  if (!email) return res.json({ error: "email required" });
 
-  console.log("VERIFY", email, error)
+  try {
+    // Ensure user row exists first
+    const { data: existing } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", email)
+      .maybeSingle();
 
-  res.json({ success: true })
+    if (!existing) {
+      await supabase.from("users").insert([{ email, isPaid: false }]);
+    }
+
+    // Now update to paid
+    const { error } = await supabase
+      .from("users")
+      .update({ isPaid: true, payment_id, plan })
+      .eq("email", email);
+
+    console.log("VERIFY PAYMENT", email, error || "OK");
+    res.json({ success: !error, error: error || null });
+  } catch (err) {
+    console.error("verify-payment exception:", err);
+    res.json({ error: err.message });
+  }
 })
 
 
