@@ -148,46 +148,57 @@ app.post("/create-subscription", async (req, res) => {
 // AI REPLY GENERATION — Gemini
 app.post("/api/ai/generate", async (req, res) => {
   const { tone, context } = req.body;
+  console.log(`[AI] Request received for tone: ${tone}`);
 
   if (!tone) return res.json({ success: false, error: "tone required" });
 
-  const systemPrompt = `You are a professional email assistant embedded in Gmail. 
-Write a concise, natural, human-sounding email reply based on the user's chosen tone.
-Rules:
-- Do NOT include a subject line
-- Do NOT use markdown or asterisks
-- Return ONLY the email body text, ready to paste
-- Keep it under 120 words
-- Sound like a real person, not a robot`;
-
-  const userPrompt = `Tone: ${tone}
-Context: ${context || "General business email — write a polite, relevant reply."}
-
-Write the email reply now.`;
+  const systemPrompt = `You are a professional business assistant. Write a short, natural email reply. No subject lines, no markdown, no quotes. Just the body text.`;
+  const userPrompt = `Context: ${context || "General professional email"}\nTone: ${tone}`;
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: systemPrompt }] },
           contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-          generationConfig: { maxOutputTokens: 250, temperature: 0.75 },
+          safetySettings: [
+            { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+            { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+            { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+            { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+          ],
+          generationConfig: { maxOutputTokens: 1000, temperature: 0.8 },
         }),
       }
     );
 
     const data = await response.json();
-    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+    
+    // LOG THE FULL DATA TO RENDER CONSOLE FOR DIAGNOSTICS
+    console.log("--- DEBUG: FULL GEMINI RESPONSE ---");
+    console.dir(data, { depth: null });
+    console.log("-----------------------------------");
 
-    if (!reply) throw new Error("Empty response from Gemini");
+    if (!response.ok) {
+      throw new Error(data.error?.message || `Google API error ${response.status}`);
+    }
 
+    // Attempt to extract text with fallback
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+
+    if (!reply) {
+      const reason = data.candidates?.[0]?.finishReason || "UNKNOWN";
+      throw new Error(`Gemini blocked the response. Reason: ${reason}`);
+    }
+
+    console.log("[AI] Generation successful");
     res.json({ success: true, reply });
   } catch (err) {
-    console.error("AI generate error:", err.message);
-    res.json({ success: false, error: err.message });
+    console.error("AI Generation Error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
