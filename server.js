@@ -9,15 +9,9 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 
 app.use(cors({
-  origin: function(origin, callback) {
-    // Allow requests from the Vercel frontend, all Chrome extensions, and direct calls (no origin)
-    if (!origin || origin === 'https://flowmail-frontend.vercel.app' || origin.startsWith('chrome-extension://')) {
-      callback(null, true);
-    } else {
-      callback(null, true); // allow all for now; tighten later in production
-    }
-  },
-  methods: ["GET", "POST"],
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }));
 app.use(bodyParser.json());
 
@@ -146,6 +140,111 @@ app.post("/create-subscription", async (req, res) => {
     console.log(err);
     res.status(500).send("Subscription error");
   }
+});
+
+
+
+
+// AI REPLY GENERATION — Gemini
+app.post("/api/ai/generate", async (req, res) => {
+  const { tone, context } = req.body;
+
+  if (!tone) return res.json({ success: false, error: "tone required" });
+
+  const systemPrompt = `You are a professional email assistant embedded in Gmail. 
+Write a concise, natural, human-sounding email reply based on the user's chosen tone.
+Rules:
+- Do NOT include a subject line
+- Do NOT use markdown or asterisks
+- Return ONLY the email body text, ready to paste
+- Keep it under 120 words
+- Sound like a real person, not a robot`;
+
+  const userPrompt = `Tone: ${tone}
+Context: ${context || "General business email — write a polite, relevant reply."}
+
+Write the email reply now.`;
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+          generationConfig: { maxOutputTokens: 250, temperature: 0.75 },
+        }),
+      }
+    );
+
+    const data = await response.json();
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+
+    if (!reply) throw new Error("Empty response from Gemini");
+
+    res.json({ success: true, reply });
+  } catch (err) {
+    console.error("AI generate error:", err.message);
+    res.json({ success: false, error: err.message });
+  }
+});
+
+
+
+// EMAIL TRACKING — Register a new tracked send
+app.post("/track/setup", async (req, res) => {
+  const { emailId, senderEmail, recipientEmail } = req.body;
+
+  if (!emailId) return res.json({ success: false, error: "emailId required" });
+
+  try {
+    const { error } = await supabase
+      .from("tracked_emails")
+      .insert([{ email_id: emailId, sender_email: senderEmail, recipient_email: recipientEmail }]);
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      pixelUrl: `https://flowmail-backend.onrender.com/track/open/${emailId}.gif`,
+    });
+  } catch (err) {
+    console.error("Track setup error:", err.message);
+    res.json({ success: false, error: err.message });
+  }
+});
+
+
+
+// EMAIL TRACKING — Pixel open event (called by recipient's email client)
+app.get("/track/open/:emailId", async (req, res) => {
+  const emailId = req.params.emailId.replace(/\.gif$/, "");
+
+  try {
+    await supabase
+      .from("tracked_emails")
+      .update({ opened: true, opened_at: new Date().toISOString() })
+      .eq("email_id", emailId)
+      .eq("opened", false); // Only log first open
+  } catch (err) {
+    console.error("Track open error:", err.message);
+  }
+
+  // Always return a 1x1 transparent GIF regardless of DB outcome
+  const pixel = Buffer.from(
+    "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+    "base64"
+  );
+  res.writeHead(200, {
+    "Content-Type": "image/gif",
+    "Content-Length": pixel.length,
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    Pragma: "no-cache",
+    Expires: "0",
+  });
+  res.end(pixel);
 });
 
 
